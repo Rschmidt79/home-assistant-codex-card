@@ -4,6 +4,20 @@ A standalone Lovelace chat card for the [Home Assistant Codex CLI Worker integra
 
 The card gives you a direct Codex task interface inside a Home Assistant dashboard while keeping the worker and integration unchanged.
 
+## Screenshots
+
+Ready for a new task:
+
+![Codex Prompt Card ready state](images/ready.png)
+
+Following an active Codex task:
+
+![Codex Prompt Card working state](images/working.png)
+
+Completed task with the full result:
+
+![Codex Prompt Card completed state](images/completed.png)
+
 ## Features
 
 - Start Codex tasks directly from Lovelace.
@@ -83,3 +97,4 @@ Codex can modify Home Assistant configuration when the worker has permission to 
 ## License
 
 MIT
+

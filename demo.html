@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Prompt Card Demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --primary-color: #03a9f4;
+        --primary-text-color: #e1e1e1;
+        --secondary-text-color: #9ba5ad;
+        --card-background-color: #111a1d;
+        --ha-card-background: #111a1d;
+        --secondary-background-color: #182326;
+        --divider-color: rgba(255, 255, 255, 0.12);
+        --error-color: #ff6b6b;
+        --warning-color: #ffb74d;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; }
+      body {
+        min-height: 100vh;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+        padding: 42px;
+        background:
+          radial-gradient(circle at 20% 0%, rgba(3, 169, 244, 0.13), transparent 32%),
+          #0b1113;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--primary-text-color);
+      }
+
+      main { width: min(760px, 100%); }
+      codex-prompt-card { display: block; width: 100%; }
+      ha-card { display: block; border-radius: 16px; }
+      ha-icon { display: inline-block; width: 24px; height: 24px; }
+      button, textarea { font: inherit; }
+    </style>
+    <script src="codex-prompt-card.js"></script>
+  </head>
+  <body>
+    <main>
+      <codex-prompt-card></codex-prompt-card>
+    </main>
+    <script>
+      const card = document.querySelector("codex-prompt-card");
+      card.setConfig({});
+
+      const state = new URLSearchParams(location.search).get("state") || "ready";
+      if (state === "working") {
+        card._activeTaskId = "20260820T123338Z-demo";
+        card.addMessage("user", "Review my Home Assistant dashboard and improve the energy overview without changing unrelated cards.");
+        card.setWorking(true, "Working", "running");
+      }
+
+      if (state === "completed") {
+        card.addMessage("user", "Check the dashboard configuration and explain the improvements you made.");
+        card.addMessage(
+          "codex",
+          "Updated the energy overview with clearer labels and consistent spacing. The dashboard configuration was validated successfully, and no unrelated cards were changed.",
+          { meta: "Done · 42s", taskId: "20260820T123338Z-demo" }
+        );
+        card.setWorking(false, "Ready", "ready");
+      }
+    </script>
+  </body>
+</html>

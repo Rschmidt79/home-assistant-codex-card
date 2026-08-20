@@ -15,7 +15,7 @@ class CodexPromptCard extends HTMLElement {
     this._initialTaskLoaded = false;
 
     this.innerHTML = `
-      <ha-card>
+      <ha-card class="${config.full_height ? "full-height" : ""}">
         <div class="wrap">
 
           <div class="header">
@@ -102,8 +102,20 @@ class CodexPromptCard extends HTMLElement {
           -webkit-user-select: text;
         }
 
+        ha-card.full-height {
+          box-sizing: border-box;
+          height: calc(100dvh - var(--header-height, 56px));
+        }
+
         .wrap {
           padding: 16px;
+        }
+
+        .full-height .wrap {
+          box-sizing: border-box;
+          display: flex;
+          flex-direction: column;
+          height: 100%;
         }
 
         .header {
@@ -234,6 +246,12 @@ class CodexPromptCard extends HTMLElement {
 
           user-select: text;
           -webkit-user-select: text;
+        }
+
+        .full-height .conversation {
+          flex: 1 1 auto;
+          min-height: 0;
+          height: auto;
         }
 
         .conversation::-webkit-scrollbar {
@@ -537,6 +555,10 @@ class CodexPromptCard extends HTMLElement {
 
           .conversation {
             height: 290px;
+          }
+
+          .full-height .conversation {
+            height: auto;
           }
 
           .bubble {

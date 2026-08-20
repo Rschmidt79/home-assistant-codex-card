@@ -63,6 +63,18 @@ This repository contains only the optional dashboard card. It does not include o
    type: custom:codex-prompt-card
    ```
 
+For a dedicated full-screen chat, create a Home Assistant **Panel** view and
+enable the card's full-height layout:
+
+```yaml
+type: custom:codex-prompt-card
+full_height: true
+```
+
+The header and composer remain visible while the conversation uses the
+remaining screen height and scrolls independently. Leave `full_height` out (or
+set it to `false`) when the card shares a view with other cards.
+
 ## Updating
 
 Replace `/config/www/codex-prompt-card.js` with the new version, then increment the resource query value, for example:
@@ -97,4 +109,3 @@ Codex can modify Home Assistant configuration when the worker has permission to 
 ## License
 
 MIT
-

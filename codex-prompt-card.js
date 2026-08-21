@@ -43,6 +43,23 @@ class CodexPromptCard extends HTMLElement {
             </div>
           </div>
 
+          <div class="runtime-info" id="runtimeInfo">
+            <div class="runtime-item model" id="modelItem" title="Current Codex model">
+              <ha-icon icon="mdi:brain"></ha-icon>
+              <span id="modelInfo">Model —</span>
+            </div>
+
+            <div class="runtime-item" id="fiveHourItem" title="5-hour usage remaining">
+              <span class="runtime-label">5h</span>
+              <span id="fiveHourInfo">—</span>
+            </div>
+
+            <div class="runtime-item" id="weeklyItem" title="Weekly usage remaining">
+              <span class="runtime-label">Week</span>
+              <span id="weeklyInfo">—</span>
+            </div>
+          </div>
+
           <div id="conversation" class="conversation">
             <div id="emptyState" class="empty-state">
               <ha-icon icon="mdi:message-text-outline"></ha-icon>
@@ -151,6 +168,54 @@ class CodexPromptCard extends HTMLElement {
           margin-top: 1px;
           font-size: 12px;
           color: var(--secondary-text-color);
+        }
+
+        .runtime-info {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          flex-wrap: wrap;
+          margin: -4px 0 10px 38px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          line-height: 1;
+          user-select: none;
+          -webkit-user-select: none;
+        }
+
+        .runtime-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          min-height: 22px;
+          box-sizing: border-box;
+          padding: 4px 7px;
+          border-radius: 999px;
+          background: color-mix(
+            in srgb,
+            var(--secondary-background-color) 80%,
+            transparent
+          );
+          white-space: nowrap;
+        }
+
+        .runtime-item ha-icon {
+          --mdc-icon-size: 13px;
+          opacity: 0.8;
+        }
+
+        .runtime-label {
+          font-weight: 600;
+          color: var(--primary-text-color);
+          opacity: 0.78;
+        }
+
+        .runtime-item.warning {
+          color: var(--warning-color, #ff9800);
+        }
+
+        .runtime-item.critical {
+          color: var(--error-color, #f44336);
         }
 
         .header-actions {
@@ -573,6 +638,15 @@ class CodexPromptCard extends HTMLElement {
             display: none;
           }
 
+          .runtime-info {
+            margin-left: 0;
+            gap: 5px;
+          }
+
+          .runtime-item {
+            padding: 4px 6px;
+          }
+
           .bubble-task {
             max-width: 120px;
           }
@@ -625,6 +699,7 @@ class CodexPromptCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this.updateRuntimeInfo(hass);
 
     if (
       !this._initialTaskLoaded &&
@@ -765,13 +840,9 @@ class CodexPromptCard extends HTMLElement {
 
     try {
       const response =
-        await this.callServiceWithResponse(
-          "codex_cli",
-          "reply_task",
-          {
-            task_id: taskId,
-            reply
-          }
+        await this.sendReplyWithRecovery(
+          taskId,
+          reply
         );
 
       const returnedTaskId =
@@ -795,6 +866,11 @@ class CodexPromptCard extends HTMLElement {
         "Working"
       );
 
+      /*
+       * The worker intentionally keeps the previous question on the task
+       * while the resumed Codex run is queued/running. pollTask() therefore
+       * keys off task.status, not the presence of task.question.
+       */
       await this.pollTask();
     }
 
@@ -804,9 +880,12 @@ class CodexPromptCard extends HTMLElement {
         error
       );
 
+      /* Keep the reply available so a transient failure does not lose it. */
+      this.querySelector("#prompt").value = reply;
+
       this.addMessage(
         "codex",
-        `Could not send the reply.\n\n${this.errorText(error)}`,
+        `Could not send the reply.\n\n${this.friendlyReplyError(error)}`,
         {
           error: true
         }
@@ -818,6 +897,95 @@ class CodexPromptCard extends HTMLElement {
         "error"
       );
     }
+  }
+
+  async sendReplyWithRecovery(
+    taskId,
+    reply
+  ) {
+    const retryDelays = [
+      0,
+      350,
+      800,
+      1600
+    ];
+
+    let lastError = null;
+
+    for (
+      let attempt = 0;
+      attempt < retryDelays.length;
+      attempt += 1
+    ) {
+      if (retryDelays[attempt] > 0) {
+        await this.sleep(
+          retryDelays[attempt]
+        );
+      }
+
+      try {
+        return await this.callServiceWithResponse(
+          "codex_cli",
+          "reply_task",
+          {
+            task_id: taskId,
+            reply
+          }
+        );
+      }
+
+      catch (error) {
+        lastError = error;
+
+        if (!this.isConflictError(error)) {
+          throw error;
+        }
+
+        /*
+         * HTTP 409 has two common meanings here:
+         * 1. the worker is still releasing the previous runner even though
+         *    the task already says waiting_for_input; retry briefly; or
+         * 2. the task has already resumed (for example after a duplicate
+         *    click / stale UI); in that case follow it instead of sending the
+         *    same reply again.
+         */
+        let task = null;
+
+        try {
+          task = await this.getTask(
+            taskId
+          );
+        }
+
+        catch (statusError) {
+          console.warn(
+            "Could not inspect task after HTTP 409:",
+            statusError
+          );
+        }
+
+        const status =
+          this.taskStatus(task);
+
+        if (this.isRunningStatus(status)) {
+          return {
+            task_id: taskId,
+            recovered_from_conflict: true
+          };
+        }
+
+        if (!this.isWaitingStatus(status)) {
+          throw error;
+        }
+      }
+    }
+
+    throw (
+      lastError ||
+      new Error(
+        "Codex did not accept the reply."
+      )
+    );
   }
 
   async cancelCurrentTask() {
@@ -922,11 +1090,7 @@ class CodexPromptCard extends HTMLElement {
           task.status || ""
         ).toLowerCase();
 
-      if (
-        task.question ||
-        status === "needs_input" ||
-        status === "waiting"
-      ) {
+      if (this.isWaitingStatus(status)) {
         this.addMessage(
           "codex",
           task.question ||
@@ -1218,15 +1382,7 @@ class CodexPromptCard extends HTMLElement {
         this.schedulePoll();
       }
 
-      else if (
-        task.question ||
-        [
-          "needs_input",
-          "waiting",
-          "waiting_for_input",
-          "question"
-        ].includes(status)
-      ) {
+      else if (this.isWaitingStatus(status)) {
         this.addMessage(
           "codex",
           task.question ||
@@ -1841,6 +1997,313 @@ class CodexPromptCard extends HTMLElement {
         });
       }
     );
+  }
+
+  async getTask(taskId) {
+    const response =
+      await this.callServiceWithResponse(
+        "codex_cli",
+        "get_task",
+        {
+          task_id: taskId
+        }
+      );
+
+    return (
+      response?.task ||
+      response ||
+      null
+    );
+  }
+
+  taskStatus(task) {
+    return String(
+      task?.status || ""
+    ).toLowerCase();
+  }
+
+  isWaitingStatus(status) {
+    return [
+      "needs_input",
+      "waiting",
+      "waiting_for_input",
+      "question"
+    ].includes(
+      String(status || "").toLowerCase()
+    );
+  }
+
+  isRunningStatus(status) {
+    return [
+      "queued",
+      "starting",
+      "running"
+    ].includes(
+      String(status || "").toLowerCase()
+    );
+  }
+
+  isConflictError(error) {
+    return /(?:^|\D)409(?:\D|$)/.test(
+      this.errorText(error)
+    );
+  }
+
+  friendlyReplyError(error) {
+    if (this.isConflictError(error)) {
+      return (
+        "Codex was not ready to accept the reply yet (HTTP 409). " +
+        "The card retried automatically, but the task state still did not allow a reply."
+      );
+    }
+
+    return this.errorText(error);
+  }
+
+  sleep(milliseconds) {
+    return new Promise(
+      resolve => setTimeout(
+        resolve,
+        milliseconds
+      )
+    );
+  }
+
+  updateRuntimeInfo(hass) {
+    if (!hass) {
+      return;
+    }
+
+    const fiveHour =
+      hass.states[
+        this.config.five_hour_entity ||
+        "sensor.codex_5_hour_limit"
+      ];
+
+    const weekly =
+      hass.states[
+        this.config.weekly_entity ||
+        "sensor.codex_weekly_limit"
+      ];
+
+    const fiveHourReset =
+      hass.states[
+        this.config.five_hour_reset_entity ||
+        "sensor.codex_5_hour_reset"
+      ];
+
+    const weeklyReset =
+      hass.states[
+        this.config.weekly_reset_entity ||
+        "sensor.codex_weekly_reset"
+      ];
+
+    const model =
+      this.config.model_label ||
+      this.extractModelFromUsage(
+        fiveHour,
+        weekly
+      ) ||
+      "Auto";
+
+    const modelInfo =
+      this.querySelector("#modelInfo");
+
+    const fiveHourInfo =
+      this.querySelector("#fiveHourInfo");
+
+    const weeklyInfo =
+      this.querySelector("#weeklyInfo");
+
+    if (modelInfo) {
+      modelInfo.textContent =
+        `Model ${model}`;
+    }
+
+    if (fiveHourInfo) {
+      fiveHourInfo.textContent =
+        this.formatQuota(fiveHour);
+    }
+
+    if (weeklyInfo) {
+      weeklyInfo.textContent =
+        this.formatQuota(weekly);
+    }
+
+    this.setQuotaClass(
+      this.querySelector("#fiveHourItem"),
+      fiveHour
+    );
+
+    this.setQuotaClass(
+      this.querySelector("#weeklyItem"),
+      weekly
+    );
+
+    const fiveTitle =
+      this.formatResetTitle(
+        "5-hour limit",
+        fiveHour,
+        fiveHourReset
+      );
+
+    const weeklyTitle =
+      this.formatResetTitle(
+        "Weekly limit",
+        weekly,
+        weeklyReset
+      );
+
+    const fiveHourItem =
+      this.querySelector("#fiveHourItem");
+
+    const weeklyItem =
+      this.querySelector("#weeklyItem");
+
+    if (fiveHourItem) {
+      fiveHourItem.title = fiveTitle;
+    }
+
+    if (weeklyItem) {
+      weeklyItem.title = weeklyTitle;
+    }
+  }
+
+  formatQuota(stateObj) {
+    const value = Number(
+      stateObj?.state
+    );
+
+    if (!Number.isFinite(value)) {
+      return "—";
+    }
+
+    return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+  }
+
+  setQuotaClass(element, stateObj) {
+    if (!element) {
+      return;
+    }
+
+    element.classList.remove(
+      "warning",
+      "critical"
+    );
+
+    const value = Number(
+      stateObj?.state
+    );
+
+    if (!Number.isFinite(value)) {
+      return;
+    }
+
+    if (value <= 10) {
+      element.classList.add(
+        "critical"
+      );
+    }
+
+    else if (value <= 25) {
+      element.classList.add(
+        "warning"
+      );
+    }
+  }
+
+  formatResetTitle(
+    label,
+    limitState,
+    resetState
+  ) {
+    const quota =
+      this.formatQuota(limitState);
+
+    const resetText =
+      limitState?.attributes?.reset_text ||
+      resetState?.attributes?.reset_text ||
+      this.formatTimestampState(resetState);
+
+    if (resetText) {
+      return `${label}: ${quota} left · resets ${resetText}`;
+    }
+
+    return `${label}: ${quota} left`;
+  }
+
+  formatTimestampState(stateObj) {
+    const raw =
+      stateObj?.state;
+
+    if (
+      !raw ||
+      [
+        "unknown",
+        "unavailable"
+      ].includes(String(raw).toLowerCase())
+    ) {
+      return "";
+    }
+
+    const date = new Date(raw);
+
+    if (Number.isNaN(date.getTime())) {
+      return String(raw);
+    }
+
+    try {
+      return new Intl.DateTimeFormat(
+        undefined,
+        {
+          weekday: "short",
+          hour: "2-digit",
+          minute: "2-digit"
+        }
+      ).format(date);
+    }
+
+    catch (error) {
+      return date.toLocaleString();
+    }
+  }
+
+  extractModelFromUsage(
+    ...stateObjects
+  ) {
+    for (const stateObj of stateObjects) {
+      const raw =
+        stateObj?.attributes?.raw_excerpt;
+
+      if (!raw) {
+        continue;
+      }
+
+      for (const rawLine of String(raw).split(/\r?\n/)) {
+        const line = rawLine
+          .replace(/[│┃║|]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        const match = line.match(
+          /\bmodel(?:\s+with\s+reasoning)?\s*:?\s*(.+)$/i
+        );
+
+        if (!match) {
+          continue;
+        }
+
+        const value = match[1]
+          .replace(/[╮╯┐┘]+$/g, "")
+          .trim();
+
+        if (value) {
+          return value;
+        }
+      }
+    }
+
+    return "";
   }
 
   async callServiceWithResponse(

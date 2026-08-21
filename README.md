@@ -4,31 +4,23 @@ A standalone Lovelace chat card for the [Home Assistant Codex CLI Worker integra
 
 The card gives you a direct Codex task interface inside a Home Assistant dashboard while keeping the worker and integration unchanged.
 
-## Screenshots
-
-Ready for a new task:
-
-![Codex Prompt Card ready state](images/ready.png)
-
-Following an active Codex task:
-
-![Codex Prompt Card working state](images/working.png)
-
-Completed task with the full result:
-
-![Codex Prompt Card completed state](images/completed.png)
-
 ## Features
 
 - Start Codex tasks directly from Lovelace.
 - Follow queued, starting, and running tasks automatically.
-- Restore an in-progress task after a dashboard or frontend reload.
+- Restore the latest task after a dashboard or frontend reload.
 - Display full task details and summaries.
-- Reply when Codex needs user input.
+- Reply when Codex actually enters a waiting-for-input state.
+- Recover gracefully from transient HTTP 409 conflicts while replying.
+- Ignore stale question text after a task has already resumed.
+- Keep a failed reply in the text box so it is not lost.
+- Show the current/reported Codex model when available.
+- Show remaining 5-hour and weekly Codex usage directly in the card.
+- Show reset information in the usage tooltips.
+- Highlight low remaining quota below 25% and critical quota at 10% or below.
 - Stop active tasks.
-- Clear the local conversation without deleting worker tasks.
+- Clear the card conversation without deleting worker tasks.
 - Retry temporary polling failures.
-- Preserve the latest conversation locally in the browser.
 - Use Home Assistant theme variables with a responsive layout.
 - No external JavaScript dependencies.
 
@@ -39,6 +31,19 @@ Install and configure the worker and integration from:
 - [moryoav/home-assistant-codex](https://github.com/moryoav/home-assistant-codex)
 
 This repository contains only the optional dashboard card. It does not include or replace the worker or integration.
+
+For the usage display, the card uses the entities exposed by the Codex integration:
+
+- `sensor.codex_5_hour_limit`
+- `sensor.codex_5_hour_reset`
+- `sensor.codex_weekly_limit`
+- `sensor.codex_weekly_reset`
+
+Task restoration uses:
+
+- `sensor.codex_last_task`
+
+If a usage entity is missing or unavailable, the card continues to work and displays `—` for that value.
 
 ## Installation
 
@@ -54,7 +59,7 @@ This repository contains only the optional dashboard card. It does not include o
 5. Add the following as a **JavaScript module**:
 
    ```text
-   /local/codex-prompt-card.js?v=1
+   /local/codex-prompt-card.js?v=2
    ```
 
 6. Add the card to a dashboard:
@@ -63,27 +68,50 @@ This repository contains only the optional dashboard card. It does not include o
    type: custom:codex-prompt-card
    ```
 
-For a dedicated full-screen chat, create a Home Assistant **Panel** view and
-enable the card's full-height layout:
+## Full-screen / panel layout
+
+For a dedicated full-screen chat, create a Home Assistant **Panel** view and enable the card's full-height layout:
 
 ```yaml
 type: custom:codex-prompt-card
 full_height: true
 ```
 
-The header and composer remain visible while the conversation uses the
-remaining screen height and scrolls independently. Leave `full_height` out (or
-set it to `false`) when the card shares a view with other cards.
+The header and composer remain visible while the conversation uses the remaining screen height and scrolls independently. Leave `full_height` out, or set it to `false`, when the card shares a view with other cards.
 
-## Updating
+## Model and usage display
 
-Replace `/config/www/codex-prompt-card.js` with the new version, then increment the resource query value, for example:
+By default the card tries to obtain the model name from the `raw_excerpt` attribute exposed by the Codex usage sensors.
 
-```text
-/local/codex-prompt-card.js?v=2
+If the integration does not report a model there, the card displays `Model Auto`. You can set a manual label if you prefer:
+
+```yaml
+type: custom:codex-prompt-card
+full_height: true
+model_label: gpt-5.6-codex
 ```
 
-Incrementing the value prevents Home Assistant and the browser from continuing to use an older cached copy. A Home Assistant restart is not required.
+The usage entities can also be overridden if your entity IDs differ:
+
+```yaml
+type: custom:codex-prompt-card
+five_hour_entity: sensor.codex_5_hour_limit
+five_hour_reset_entity: sensor.codex_5_hour_reset
+weekly_entity: sensor.codex_weekly_limit
+weekly_reset_entity: sensor.codex_weekly_reset
+```
+
+The percentages shown are the remaining quota reported by the Codex integration.
+
+## Reply handling and HTTP 409
+
+The Codex worker only accepts `reply_task` while a task is actually waiting for input.
+
+A task can still contain its previous `question` text after the reply has been accepted and the task has returned to `queued` or `running`. The card therefore uses the task **status**, rather than the presence of `task.question`, to decide whether Reply mode should be active.
+
+If the worker returns HTTP 409 during a reply, the card briefly re-checks the task state and retries when the task is still waiting. If the task has already resumed, the card follows the running task instead of sending the same reply again.
+
+If the reply still cannot be accepted, the text is restored to the composer so it can be retried without retyping it.
 
 ## Task restoration
 
@@ -96,11 +124,27 @@ After a frontend reload, task states are restored explicitly:
 - `failed`, `error`: error result.
 - Unknown states are shown as errors and are never treated as completed.
 
+## Current conversation limitation
+
+The worker API supports replying to a task while it is waiting for input, but a completely finished task cannot currently be continued as an open-ended chat thread through this card.
+
+After a task reaches `completed`, the next message starts a new Codex task. Supporting a true continuous ChatGPT-style conversation would require an additional resume/continue API in the worker integration.
+
 ## Clear and Stop
 
-**Clear** resets only this card's locally stored conversation and remembered task. It does not cancel or delete work in the Codex worker.
+**Clear** resets only the conversation shown in this card. It does not cancel or delete work in the Codex worker.
 
 **Stop** requests cancellation of the active worker task.
+
+## Updating
+
+Replace `/config/www/codex-prompt-card.js` with the new version, then increment the resource query value, for example:
+
+```text
+/local/codex-prompt-card.js?v=3
+```
+
+Incrementing the value prevents Home Assistant and the browser from continuing to use an older cached copy. A Home Assistant restart is normally not required.
 
 ## Security
 

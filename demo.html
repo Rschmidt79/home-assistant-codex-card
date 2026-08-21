@@ -49,11 +49,55 @@
       const card = document.querySelector("codex-prompt-card");
       card.setConfig({});
 
+      card.hass = {
+        states: {
+          "sensor.codex_last_task": {
+            state: "completed",
+            attributes: {}
+          },
+          "sensor.codex_5_hour_limit": {
+            state: "72",
+            attributes: {
+              reset_text: "21:30",
+              raw_excerpt: "Model: gpt-5-codex\n5h 72% left\nWeekly 61% left"
+            }
+          },
+          "sensor.codex_5_hour_reset": {
+            state: "2026-08-21T21:30:00+02:00",
+            attributes: { reset_text: "21:30" }
+          },
+          "sensor.codex_weekly_limit": {
+            state: "61",
+            attributes: {
+              reset_text: "Monday 09:00",
+              raw_excerpt: "Model: gpt-5-codex\n5h 72% left\nWeekly 61% left"
+            }
+          },
+          "sensor.codex_weekly_reset": {
+            state: "2026-08-24T09:00:00+02:00",
+            attributes: { reset_text: "Monday 09:00" }
+          }
+        }
+      };
+
       const state = new URLSearchParams(location.search).get("state") || "ready";
+
       if (state === "working") {
-        card._activeTaskId = "20260820T123338Z-demo";
+        card._activeTaskId = "20260821T173000Z-demo";
         card.addMessage("user", "Review my Home Assistant dashboard and improve the energy overview without changing unrelated cards.");
         card.setWorking(true, "Working", "running");
+      }
+
+      if (state === "waiting") {
+        card._waitingTaskId = "20260821T173000Z-demo";
+        card.addMessage("user", "Test the Victoria disco light and verify the service call.");
+        card.addMessage(
+          "codex",
+          "Press Disco once more as Victoria to stop the test, then reply yes.",
+          { question: true, meta: "Waiting for reply", taskId: "20260821T173000Z-demo" }
+        );
+        card.setInputMode(true);
+        card.setWorking(false, "Waiting", "waiting");
       }
 
       if (state === "completed") {
@@ -61,7 +105,7 @@
         card.addMessage(
           "codex",
           "Updated the energy overview with clearer labels and consistent spacing. The dashboard configuration was validated successfully, and no unrelated cards were changed.",
-          { meta: "Done · 42s", taskId: "20260820T123338Z-demo" }
+          { meta: "Done · 42s", taskId: "20260821T173000Z-demo" }
         );
         card.setWorking(false, "Ready", "ready");
       }

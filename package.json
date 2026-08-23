@@ -1,0 +1,11 @@
+{
+  "name": "home-assistant-codex-card",
+  "version": "3.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}

@@ -10,6 +10,8 @@ The card gives you a direct Codex task interface inside a Home Assistant dashboa
 - Follow queued, starting, and running tasks automatically.
 - Restore the latest task after a dashboard or frontend reload.
 - Display full task details and summaries.
+- Follow new messages only while the conversation is already at the bottom.
+- Keep the viewport stable while reading history and offer a **Latest** shortcut.
 - Reply when Codex actually enters a waiting-for-input state.
 - Recover gracefully from transient HTTP 409 conflicts while replying.
 - Ignore stale question text after a task has already resumed.
@@ -20,7 +22,7 @@ The card gives you a direct Codex task interface inside a Home Assistant dashboa
 - Highlight low remaining quota below 25% and critical quota at 10% or below.
 - Stop active tasks.
 - Clear the card conversation without deleting worker tasks.
-- Retry temporary polling failures.
+- Retry temporary polling failures silently without Home Assistant error toasts.
 - Use Home Assistant theme variables with a responsive layout.
 - No external JavaScript dependencies.
 
@@ -59,7 +61,7 @@ If a usage entity is missing or unavailable, the card continues to work and disp
 5. Add the following as a **JavaScript module**:
 
    ```text
-   /local/codex-prompt-card.js?v=2
+   /local/codex-prompt-card.js?v=3
    ```
 
 6. Add the card to a dashboard:
@@ -78,6 +80,12 @@ full_height: true
 ```
 
 The header and composer remain visible while the conversation uses the remaining screen height and scrolls independently. Leave `full_height` out, or set it to `false`, when the card shares a view with other cards.
+
+## Conversation scrolling
+
+The card follows new messages only while the conversation is already at, or very close to, the bottom. If you scroll up to read earlier messages, polling and new task updates leave the viewport in place.
+
+A **Latest** button appears when the conversation is away from the bottom. It is highlighted when a new message has arrived and returns the conversation to the latest message when selected.
 
 ## Model and usage display
 
@@ -113,6 +121,8 @@ If the worker returns HTTP 409 during a reply, the card briefly re-checks the ta
 
 If the reply still cannot be accepted, the text is restored to the composer so it can be retried without retyping it.
 
+Expected HTTP 409 responses are handled inside the card and do not produce intermediate Home Assistant error notifications. A final reply failure is still shown clearly in the conversation.
+
 ## Task restoration
 
 After a frontend reload, task states are restored explicitly:
@@ -123,6 +133,8 @@ After a frontend reload, task states are restored explicitly:
 - `cancelled`, `canceled`: cancelled result.
 - `failed`, `error`: error result.
 - Unknown states are shown as errors and are never treated as completed.
+
+Temporary `get_task` connection failures are retried with a bounded backoff. Background polling and task restoration do not show Home Assistant error toasts, while failures from explicit **Send**, **Reply**, and **Stop** actions remain visible to the user.
 
 ## Current conversation limitation
 
@@ -145,6 +157,15 @@ Replace `/config/www/codex-prompt-card.js` with the new version, then increment 
 ```
 
 Incrementing the value prevents Home Assistant and the browser from continuing to use an older cached copy. A Home Assistant restart is normally not required.
+
+## Development tests
+
+The automated tests cover intelligent scrolling, silent polling recovery, stale task responses, active-task send guards, and HTTP 409 reply recovery.
+
+```bash
+pnpm install
+pnpm test
+```
 
 ## Security
 

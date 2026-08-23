@@ -1,5 +1,16 @@
 class CodexPromptCard extends HTMLElement {
   setConfig(config) {
+    this.stopPolling();
+
+    if (this._scrollSettleTimer) {
+      clearTimeout(
+        this._scrollSettleTimer
+      );
+    }
+
+    this._requestGeneration =
+      (this._requestGeneration || 0) + 1;
+
     this.config = config;
 
     this._hass = null;
@@ -9,10 +20,17 @@ class CodexPromptCard extends HTMLElement {
 
     this._pollTimer = null;
     this._pollBusy = false;
+    this._pollFailureCount = 0;
     this._cancelling = false;
+    this._operationBusy = false;
 
     this._messages = [];
+    this._taskMessageKeys = new Set();
     this._initialTaskLoaded = false;
+    this._isFollowingLatest = true;
+    this._hasUnreadMessages = false;
+    this._scrollingToLatest = false;
+    this._scrollSettleTimer = null;
 
     this.innerHTML = `
       <ha-card class="${config.full_height ? "full-height" : ""}">
@@ -60,11 +78,23 @@ class CodexPromptCard extends HTMLElement {
             </div>
           </div>
 
-          <div id="conversation" class="conversation">
-            <div id="emptyState" class="empty-state">
-              <ha-icon icon="mdi:message-text-outline"></ha-icon>
-              <div>Write a task for Codex below.</div>
+          <div class="conversation-shell">
+            <div id="conversation" class="conversation">
+              <div id="emptyState" class="empty-state">
+                <ha-icon icon="mdi:message-text-outline"></ha-icon>
+                <div>Write a task for Codex below.</div>
+              </div>
             </div>
+
+            <button
+              id="jumpToLatest"
+              class="jump-to-latest hidden"
+              type="button"
+              title="Jump to latest message"
+              aria-label="Jump to latest message"
+            >
+              Latest ↓
+            </button>
           </div>
 
           <div id="workingIndicator" class="working-indicator hidden">
@@ -292,12 +322,19 @@ class CodexPromptCard extends HTMLElement {
           cursor: default;
         }
 
-        .conversation {
+        .conversation-shell {
+          position: relative;
           height: 330px;
+          min-height: 0;
+          margin-bottom: 8px;
+        }
+
+        .conversation {
+          box-sizing: border-box;
+          height: 100%;
           overflow-y: auto;
           overscroll-behavior: contain;
           padding: 3px 5px 3px 1px;
-          margin-bottom: 8px;
           scroll-behavior: smooth;
 
           scrollbar-width: thin;
@@ -313,10 +350,47 @@ class CodexPromptCard extends HTMLElement {
           -webkit-user-select: text;
         }
 
-        .full-height .conversation {
+        .full-height .conversation-shell {
           flex: 1 1 auto;
           min-height: 0;
           height: auto;
+        }
+
+        .jump-to-latest {
+          position: absolute;
+          right: 13px;
+          bottom: 12px;
+          z-index: 1;
+          border: 1px solid
+            color-mix(
+              in srgb,
+              var(--primary-color) 35%,
+              var(--divider-color)
+            );
+          border-radius: 999px;
+          padding: 7px 11px;
+          background: var(--card-background-color);
+          color: var(--primary-color);
+          box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+          font: inherit;
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+        }
+
+        .jump-to-latest:hover {
+          background: var(--secondary-background-color);
+        }
+
+        .jump-to-latest.has-unread::before {
+          content: "";
+          display: inline-block;
+          width: 6px;
+          height: 6px;
+          margin-right: 5px;
+          border-radius: 50%;
+          background: var(--primary-color);
+          vertical-align: 1px;
         }
 
         .conversation::-webkit-scrollbar {
@@ -618,11 +692,11 @@ class CodexPromptCard extends HTMLElement {
             padding: 14px;
           }
 
-          .conversation {
+          .conversation-shell {
             height: 290px;
           }
 
-          .full-height .conversation {
+          .full-height .conversation-shell {
             height: auto;
           }
 
@@ -683,6 +757,17 @@ class CodexPromptCard extends HTMLElement {
       () => this.clearConversation()
     );
 
+    this.querySelector("#jumpToLatest").addEventListener(
+      "click",
+      () => this.scrollConversationToBottom()
+    );
+
+    this.querySelector("#conversation").addEventListener(
+      "scroll",
+      () => this.handleConversationScroll(),
+      { passive: true }
+    );
+
     this.querySelector("#prompt").addEventListener(
       "keydown",
       event => {
@@ -720,7 +805,11 @@ class CodexPromptCard extends HTMLElement {
   }
 
   async handleSend() {
-    if (!this._hass || this._cancelling) {
+    if (
+      !this._hass ||
+      this._cancelling ||
+      this._operationBusy
+    ) {
       return;
     }
 
@@ -743,11 +832,20 @@ class CodexPromptCard extends HTMLElement {
       return;
     }
 
+    if (this._activeTaskId) {
+      return;
+    }
+
     await this.startTask(text);
   }
 
   async startTask(prompt) {
     this.stopPolling();
+
+    const generation =
+      this.invalidateRequests();
+
+    this._operationBusy = true;
 
     this.addMessage(
       "user",
@@ -771,6 +869,10 @@ class CodexPromptCard extends HTMLElement {
           }
         );
 
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
+
       const taskId =
         response?.task_id ||
         response?.task?.task_id;
@@ -792,12 +894,14 @@ class CodexPromptCard extends HTMLElement {
         "Working"
       );
 
-      this.scrollConversationToBottom();
-
       await this.pollTask();
     }
 
     catch (error) {
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
+
       console.error(
         "Codex start_task failed:",
         error
@@ -820,12 +924,23 @@ class CodexPromptCard extends HTMLElement {
         "error"
       );
     }
+
+    finally {
+      if (this.isCurrentRequest(generation)) {
+        this._operationBusy = false;
+      }
+    }
   }
 
   async replyToTask(
     taskId,
     reply
   ) {
+    const generation =
+      this.invalidateRequests();
+
+    this._operationBusy = true;
+
     this.addMessage(
       "user",
       reply
@@ -842,8 +957,23 @@ class CodexPromptCard extends HTMLElement {
       const response =
         await this.sendReplyWithRecovery(
           taskId,
-          reply
+          reply,
+          generation
         );
+
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
+
+      if (response?.recovered_task) {
+        this._waitingTaskId = null;
+        this.applyTaskSnapshot(
+          response.recovered_task,
+          { expectedTaskId: taskId }
+        );
+
+        return;
+      }
 
       const returnedTaskId =
         response?.task_id ||
@@ -875,6 +1005,10 @@ class CodexPromptCard extends HTMLElement {
     }
 
     catch (error) {
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
+
       console.error(
         "Codex reply_task failed:",
         error
@@ -897,11 +1031,18 @@ class CodexPromptCard extends HTMLElement {
         "error"
       );
     }
+
+    finally {
+      if (this.isCurrentRequest(generation)) {
+        this._operationBusy = false;
+      }
+    }
   }
 
   async sendReplyWithRecovery(
     taskId,
-    reply
+    reply,
+    generation = this._requestGeneration
   ) {
     const retryDelays = [
       0,
@@ -923,6 +1064,12 @@ class CodexPromptCard extends HTMLElement {
         );
       }
 
+      if (!this.isCurrentRequest(generation)) {
+        throw new Error(
+          "Reply was superseded by a newer card operation."
+        );
+      }
+
       try {
         return await this.callServiceWithResponse(
           "codex_cli",
@@ -930,6 +1077,9 @@ class CodexPromptCard extends HTMLElement {
           {
             task_id: taskId,
             reply
+          },
+          {
+            notifyOnError: false
           }
         );
       }
@@ -953,7 +1103,10 @@ class CodexPromptCard extends HTMLElement {
 
         try {
           task = await this.getTask(
-            taskId
+            taskId,
+            {
+              notifyOnError: false
+            }
           );
         }
 
@@ -972,6 +1125,18 @@ class CodexPromptCard extends HTMLElement {
             task_id: taskId,
             recovered_from_conflict: true
           };
+        }
+
+        if (this.isTerminalStatus(status)) {
+          return {
+            task_id: taskId,
+            recovered_from_conflict: true,
+            recovered_task: task
+          };
+        }
+
+        if (!task) {
+          continue;
         }
 
         if (!this.isWaitingStatus(status)) {
@@ -1000,6 +1165,9 @@ class CodexPromptCard extends HTMLElement {
     const taskId =
       this._activeTaskId;
 
+    const generation =
+      this._requestGeneration;
+
     this._cancelling =
       true;
 
@@ -1013,6 +1181,16 @@ class CodexPromptCard extends HTMLElement {
           task_id: taskId
         }
       );
+
+      if (
+        !this.isCurrentTaskRequest(
+          generation,
+          taskId
+        ) ||
+        !this._cancelling
+      ) {
+        return;
+      }
 
       /*
        * Do not assume cancellation is immediate.
@@ -1028,6 +1206,15 @@ class CodexPromptCard extends HTMLElement {
     }
 
     catch (error) {
+      if (
+        !this.isCurrentTaskRequest(
+          generation,
+          taskId
+        )
+      ) {
+        return;
+      }
+
       console.error(
         "Codex cancel_task failed:",
         error
@@ -1062,6 +1249,12 @@ class CodexPromptCard extends HTMLElement {
       return;
     }
 
+    const taskId =
+      this._activeTaskId;
+
+    const generation =
+      this._requestGeneration;
+
     this._pollBusy = true;
 
     try {
@@ -1070,10 +1263,21 @@ class CodexPromptCard extends HTMLElement {
           "codex_cli",
           "get_task",
           {
-            task_id:
-              this._activeTaskId
+            task_id: taskId
+          },
+          {
+            notifyOnError: false
           }
         );
+
+      if (
+        !this.isCurrentTaskRequest(
+          generation,
+          taskId
+        )
+      ) {
+        return;
+      }
 
       const task =
         response?.task ||
@@ -1085,204 +1289,64 @@ class CodexPromptCard extends HTMLElement {
         );
       }
 
-      const status =
-        String(
-          task.status || ""
-        ).toLowerCase();
+      this._pollFailureCount = 0;
 
-      if (this.isWaitingStatus(status)) {
-        this.addMessage(
-          "codex",
-          task.question ||
-            "I need your input before I can continue.",
+      const state =
+        this.applyTaskSnapshot(
+          task,
           {
-            question: true,
-            meta:
-              "Waiting for reply",
-            taskId:
-              task.task_id
+            expectedTaskId: taskId,
+            unknownAsRunning: true
           }
         );
 
-        this._waitingTaskId =
-          task.task_id;
-
-        this._activeTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.stopPolling();
-
-        this.setInputMode(true);
-
-        this.setWorking(
-          false,
-          "Waiting",
-          "waiting"
-        );
-
-        return;
-      }
-
-      if (status === "completed") {
-        const text =
-          task.details ||
-          task.summary ||
-          "The task is complete.";
-
-        this.addMessage(
-          "codex",
-          text,
-          {
-            meta:
-              this.buildShortMeta(task),
-
-            taskId:
-              task.task_id
-          }
-        );
-
-        this._displayedTaskId =
-          task.task_id;
-
-        this._activeTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.stopPolling();
-
-        this.setInputMode(false);
-
-        this.setWorking(
-          false,
-          "Ready",
-          "ready"
-        );
-
-        return;
-      }
-
-      if (
-        [
-          "cancelled",
-          "canceled"
-        ].includes(status)
-      ) {
-        this.addMessage(
-          "codex",
-          task.details ||
-            task.summary ||
-            "The task was cancelled.",
-          {
-            cancelled: true,
-            meta:
-              "Cancelled",
-            taskId:
-              task.task_id
-          }
-        );
-
-        this._displayedTaskId =
-          task.task_id;
-
-        this._activeTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.stopPolling();
-
-        this.setInputMode(false);
-
-        this.setWorking(
-          false,
-          "Ready",
-          "ready"
-        );
-
-        return;
-      }
-
-      if (
-        [
-          "failed",
-          "error"
-        ].includes(status)
-      ) {
-        this.addMessage(
-          "codex",
-          task.error ||
-            task.details ||
-            "The task failed.",
-          {
-            error: true,
-            meta:
-              this.buildShortMeta(task),
-            taskId:
-              task.task_id
-          }
-        );
-
-        this._activeTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.stopPolling();
-
-        this.setWorking(
-          false,
-          "Error",
-          "error"
-        );
-
-        return;
-      }
-
-      /*
-       * Still running or cancelling.
-       */
-      if (this._cancelling) {
-        this.setCancellingUI();
-      }
-
-      else {
-        this.setWorking(
-          true,
-          "Working"
+      if (state === "running") {
+        this.schedulePoll(
+          this._cancelling
+            ? 1000
+            : 2500
         );
       }
-
-      this.schedulePoll(
-        this._cancelling
-          ? 1000
-          : 2500
-      );
     }
 
     catch (error) {
+      if (
+        !this.isCurrentTaskRequest(
+          generation,
+          taskId
+        )
+      ) {
+        return;
+      }
+
       console.error(
         "Codex polling failed:",
         error
       );
+
+      this._pollFailureCount += 1;
 
       this.querySelector(
         "#statusText"
       ).textContent =
         "Connection interrupted — retrying…";
 
-      this.schedulePoll(5000);
+      this.schedulePoll(
+        Math.min(
+          30000,
+          2500 * (2 ** Math.min(
+            this._pollFailureCount,
+            4
+          ))
+        )
+      );
     }
 
     finally {
-      this._pollBusy =
-        false;
+      if (this.isCurrentRequest(generation)) {
+        this._pollBusy =
+          false;
+      }
     }
   }
 
@@ -1291,7 +1355,10 @@ class CodexPromptCard extends HTMLElement {
   ) {
     this.stopPolling();
 
-    if (!this._activeTaskId) {
+    if (
+      !this._activeTaskId ||
+      !this.isConnected
+    ) {
       return;
     }
 
@@ -1325,6 +1392,9 @@ class CodexPromptCard extends HTMLElement {
       return;
     }
 
+    const generation =
+      this._requestGeneration;
+
     try {
       const response =
         await this.callServiceWithResponse(
@@ -1333,8 +1403,15 @@ class CodexPromptCard extends HTMLElement {
           {
             task_id:
               taskId
+          },
+          {
+            notifyOnError: false
           }
         );
+
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
 
       const task =
         response?.task ||
@@ -1344,187 +1421,281 @@ class CodexPromptCard extends HTMLElement {
         return;
       }
 
-      if (task.prompt) {
-        this.addMessage(
-          "user",
-          task.prompt
-        );
-      }
+      this._cancelling = false;
 
-      const status =
-        String(
-          task.status || ""
-        ).toLowerCase();
-
-      if (
-        [
-          "queued",
-          "starting",
-          "running"
-        ].includes(status)
-      ) {
-        this._activeTaskId =
-          task.task_id;
-
-        this._waitingTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.setInputMode(false);
-
-        this.setWorking(
-          true,
-          "Working"
+      const state =
+        this.applyTaskSnapshot(
+          task,
+          {
+            expectedTaskId: taskId,
+            includePrompt: true
+          }
         );
 
+      if (state === "running") {
         this.schedulePoll();
       }
-
-      else if (this.isWaitingStatus(status)) {
-        this.addMessage(
-          "codex",
-          task.question ||
-            "I need your input before I can continue.",
-          {
-            question: true,
-            meta:
-              "Waiting for reply",
-            taskId:
-              task.task_id
-          }
-        );
-
-        this._waitingTaskId =
-          task.task_id;
-
-        this._activeTaskId =
-          null;
-
-        this._cancelling =
-          false;
-
-        this.stopPolling();
-
-        this.setInputMode(true);
-
-        this.setWorking(
-          false,
-          "Waiting",
-          "waiting"
-        );
-      }
-
-      else if (
-        status === "completed"
-      ) {
-        this.addMessage(
-          "codex",
-          task.details ||
-            task.summary ||
-            "The task is complete.",
-          {
-            meta:
-              this.buildShortMeta(task),
-
-            taskId:
-              task.task_id
-          }
-        );
-
-        this.setWorking(
-          false,
-          "Ready",
-          "ready"
-        );
-      }
-
-      else if (
-        [
-          "cancelled",
-          "canceled"
-        ].includes(status)
-      ) {
-        this.addMessage(
-          "codex",
-          task.details ||
-            task.summary ||
-            "The task was cancelled.",
-          {
-            cancelled: true,
-            meta:
-              "Cancelled",
-            taskId:
-              task.task_id
-          }
-        );
-
-        this.setWorking(
-          false,
-          "Ready",
-          "ready"
-        );
-      }
-
-      else if (
-        [
-          "failed",
-          "error"
-        ].includes(status)
-      ) {
-        this.addMessage(
-          "codex",
-          task.error ||
-            task.details ||
-            "The task failed.",
-          {
-            error: true,
-            meta:
-              this.buildShortMeta(task),
-
-            taskId:
-              task.task_id
-          }
-        );
-
-        this.setWorking(
-          false,
-          "Error",
-          "error"
-        );
-      }
-
-      else {
-        this.addMessage(
-          "codex",
-          `Unknown task status: ${status || "missing"}.`,
-          {
-            error: true,
-            meta:
-              "Unknown status",
-            taskId:
-              task.task_id
-          }
-        );
-
-        this.setWorking(
-          false,
-          "Error",
-          "error"
-        );
-      }
-
-      this._displayedTaskId =
-        task.task_id;
     }
 
     catch (error) {
+      if (!this.isCurrentRequest(generation)) {
+        return;
+      }
+
       console.error(
         "Could not load latest Codex task:",
         error
       );
+
+      this._activeTaskId = taskId;
+      this._waitingTaskId = null;
+      this._cancelling = false;
+
+      this.setInputMode(false);
+      this.setWorking(
+        true,
+        "Reconnecting"
+      );
+
+      this.querySelector(
+        "#statusText"
+      ).textContent =
+        "Connection interrupted — retrying…";
+
+      this.schedulePoll(5000);
     }
+  }
+
+  applyTaskSnapshot(
+    task,
+    options = {}
+  ) {
+    if (
+      options.expectedTaskId &&
+      task?.task_id &&
+      task.task_id !== options.expectedTaskId
+    ) {
+      throw new Error(
+        `The worker returned task ${task.task_id} while ${options.expectedTaskId} was requested.`
+      );
+    }
+
+    const status =
+      this.taskStatus(task);
+
+    const taskId =
+      task?.task_id ||
+      options.expectedTaskId ||
+      this._activeTaskId ||
+      this._waitingTaskId ||
+      "";
+
+    if (options.includePrompt && task?.prompt) {
+      this.addTaskMessage(
+        `${taskId}:prompt:${task.prompt}`,
+        "user",
+        task.prompt
+      );
+    }
+
+    if (this.isRunningStatus(status)) {
+      this._activeTaskId = taskId;
+      this._waitingTaskId = null;
+
+      this.setInputMode(false);
+
+      if (this._cancelling) {
+        this.setCancellingUI();
+      }
+
+      else {
+        this.setWorking(
+          true,
+          "Working"
+        );
+      }
+
+      return "running";
+    }
+
+    if (this.isWaitingStatus(status)) {
+      const question =
+        task?.question ||
+        "I need your input before I can continue.";
+
+      this.addTaskMessage(
+        `${taskId}:question:${question}`,
+        "codex",
+        question,
+        {
+          question: true,
+          meta: "Waiting for reply",
+          taskId
+        }
+      );
+
+      this._waitingTaskId = taskId;
+      this._activeTaskId = null;
+      this._cancelling = false;
+
+      this.stopPolling();
+      this.setInputMode(true);
+      this.setWorking(
+        false,
+        "Waiting",
+        "waiting"
+      );
+
+      return "waiting";
+    }
+
+    if (status === "completed") {
+      const text =
+        task?.details ||
+        task?.summary ||
+        "The task is complete.";
+
+      this.addTaskMessage(
+        `${taskId}:completed:${text}`,
+        "codex",
+        text,
+        {
+          meta: this.buildShortMeta(task),
+          taskId
+        }
+      );
+
+      this.finishTaskState(
+        taskId,
+        "Ready",
+        "ready"
+      );
+
+      return "terminal";
+    }
+
+    if (["cancelled", "canceled"].includes(status)) {
+      const text =
+        task?.details ||
+        task?.summary ||
+        "The task was cancelled.";
+
+      this.addTaskMessage(
+        `${taskId}:cancelled:${text}`,
+        "codex",
+        text,
+        {
+          cancelled: true,
+          meta: "Cancelled",
+          taskId
+        }
+      );
+
+      this.finishTaskState(
+        taskId,
+        "Ready",
+        "ready"
+      );
+
+      return "terminal";
+    }
+
+    if (["failed", "error"].includes(status)) {
+      const text =
+        task?.error ||
+        task?.details ||
+        "The task failed.";
+
+      this.addTaskMessage(
+        `${taskId}:failed:${text}`,
+        "codex",
+        text,
+        {
+          error: true,
+          meta: this.buildShortMeta(task),
+          taskId
+        }
+      );
+
+      this.finishTaskState(
+        taskId,
+        "Error",
+        "error"
+      );
+
+      return "terminal";
+    }
+
+    if (options.unknownAsRunning) {
+      if (this._cancelling) {
+        this.setCancellingUI();
+      }
+
+      else {
+        this.setWorking(
+          true,
+          "Working"
+        );
+      }
+
+      return "running";
+    }
+
+    this.addTaskMessage(
+      `${taskId}:unknown:${status}`,
+      "codex",
+      `Unknown task status: ${status || "missing"}.`,
+      {
+        error: true,
+        meta: "Unknown status",
+        taskId
+      }
+    );
+
+    this.finishTaskState(
+      taskId,
+      "Error",
+      "error"
+    );
+
+    return "unknown";
+  }
+
+  finishTaskState(
+    taskId,
+    label,
+    stateClass
+  ) {
+    this._displayedTaskId = taskId;
+    this._activeTaskId = null;
+    this._waitingTaskId = null;
+    this._cancelling = false;
+
+    this.stopPolling();
+    this.setInputMode(false);
+    this.setWorking(
+      false,
+      label,
+      stateClass
+    );
+  }
+
+  addTaskMessage(
+    key,
+    role,
+    text,
+    options = {}
+  ) {
+    if (this._taskMessageKeys.has(key)) {
+      return;
+    }
+
+    this._taskMessageKeys.add(key);
+    this.addMessage(
+      role,
+      text,
+      options
+    );
   }
 
   clearConversation() {
@@ -1535,7 +1706,10 @@ class CodexPromptCard extends HTMLElement {
       return;
     }
 
+    this.invalidateRequests();
+
     this._messages = [];
+    this._taskMessageKeys.clear();
 
     this._waitingTaskId =
       null;
@@ -1559,6 +1733,10 @@ class CodexPromptCard extends HTMLElement {
         <div>Write a task for Codex below.</div>
       </div>
     `;
+
+    this._isFollowingLatest = true;
+    this._hasUnreadMessages = false;
+    this.updateJumpToLatest();
 
     this.setWorking(
       false,
@@ -1620,6 +1798,15 @@ class CodexPromptCard extends HTMLElement {
     ) {
       return;
     }
+
+    const shouldFollow =
+      this._isFollowingLatest ||
+      this.isConversationNearBottom(
+        conversation
+      );
+
+    const previousScrollTop =
+      conversation.scrollTop;
 
     conversation.innerHTML =
       "";
@@ -1754,7 +1941,30 @@ class CodexPromptCard extends HTMLElement {
       );
     }
 
-    this.scrollConversationToBottom();
+    if (shouldFollow) {
+      this.scrollConversationToBottom(
+        "smooth"
+      );
+    }
+
+    else {
+      this._isFollowingLatest = false;
+      this._hasUnreadMessages = true;
+
+      conversation.scrollTop =
+        previousScrollTop;
+
+      this.updateJumpToLatest();
+
+      requestAnimationFrame(
+        () => {
+          conversation.scrollTop =
+            previousScrollTop;
+
+          this.updateJumpToLatest();
+        }
+      );
+    }
   }
 
   setInputMode(
@@ -1838,6 +2048,9 @@ class CodexPromptCard extends HTMLElement {
         "#workingText"
       );
 
+    stopButton.textContent =
+      "Stop";
+
     button.disabled =
       running;
 
@@ -1881,12 +2094,13 @@ class CodexPromptCard extends HTMLElement {
       workingText.textContent =
         "Codex is working";
 
-      stopButton.classList.remove(
-        "hidden"
+      stopButton.classList.toggle(
+        "hidden",
+        !this._activeTaskId
       );
 
       stopButton.disabled =
-        false;
+        !this._activeTaskId;
 
       button.textContent =
         "Working…";
@@ -1894,7 +2108,6 @@ class CodexPromptCard extends HTMLElement {
       statusText.textContent =
         "Following task automatically";
 
-      this.scrollConversationToBottom();
     }
 
     else {
@@ -1976,7 +2189,82 @@ class CodexPromptCard extends HTMLElement {
       "Cancellation requested — waiting for worker…";
   }
 
-  scrollConversationToBottom() {
+  isConversationNearBottom(
+    conversation = this.querySelector("#conversation"),
+    threshold = 32
+  ) {
+    if (!conversation) {
+      return true;
+    }
+
+    return (
+      conversation.scrollHeight -
+      conversation.scrollTop -
+      conversation.clientHeight
+    ) <= threshold;
+  }
+
+  handleConversationScroll() {
+    const conversation =
+      this.querySelector("#conversation");
+
+    const nearBottom =
+      this.isConversationNearBottom(
+        conversation
+      );
+
+    if (
+      this._scrollingToLatest &&
+      !nearBottom
+    ) {
+      return;
+    }
+
+    this._isFollowingLatest =
+      nearBottom;
+
+    if (nearBottom) {
+      this._hasUnreadMessages = false;
+      this._scrollingToLatest = false;
+    }
+
+    this.updateJumpToLatest();
+  }
+
+  updateJumpToLatest() {
+    const button =
+      this.querySelector("#jumpToLatest");
+
+    if (!button) {
+      return;
+    }
+
+    button.classList.toggle(
+      "hidden",
+      this._isFollowingLatest ||
+      this._messages.length === 0
+    );
+
+    button.classList.toggle(
+      "has-unread",
+      this._hasUnreadMessages
+    );
+  }
+
+  scrollConversationToBottom(
+    behavior = "smooth"
+  ) {
+    this._isFollowingLatest = true;
+    this._hasUnreadMessages = false;
+    this._scrollingToLatest = true;
+    this.updateJumpToLatest();
+
+    if (this._scrollSettleTimer) {
+      clearTimeout(
+        this._scrollSettleTimer
+      );
+    }
+
     requestAnimationFrame(
       () => {
         const conversation =
@@ -1992,20 +2280,37 @@ class CodexPromptCard extends HTMLElement {
           top:
             conversation.scrollHeight,
 
-          behavior:
-            "smooth"
+          behavior
         });
+
+        this._scrollSettleTimer =
+          setTimeout(
+            () => {
+              this._scrollingToLatest = false;
+              this.handleConversationScroll();
+            },
+            behavior === "smooth"
+              ? 500
+              : 0
+          );
       }
     );
   }
 
-  async getTask(taskId) {
+  async getTask(
+    taskId,
+    options = {}
+  ) {
     const response =
       await this.callServiceWithResponse(
         "codex_cli",
         "get_task",
         {
           task_id: taskId
+        },
+        {
+          notifyOnError:
+            options.notifyOnError ?? false
         }
       );
 
@@ -2043,9 +2348,36 @@ class CodexPromptCard extends HTMLElement {
     );
   }
 
+  isTerminalStatus(status) {
+    return [
+      "completed",
+      "cancelled",
+      "canceled",
+      "failed",
+      "error"
+    ].includes(
+      String(status || "").toLowerCase()
+    );
+  }
+
   isConflictError(error) {
-    return /(?:^|\D)409(?:\D|$)/.test(
-      this.errorText(error)
+    const candidates = [
+      error?.status,
+      error?.statusCode,
+      error?.code,
+      error?.body?.status,
+      error?.body?.statusCode,
+      error?.body?.code,
+      error?.message,
+      error?.body?.message
+    ];
+
+    return candidates.some(
+      value =>
+        Number(value) === 409 ||
+        /(?:^|\D)409(?:\D|$)/.test(
+          String(value || "")
+        )
     );
   }
 
@@ -2066,6 +2398,32 @@ class CodexPromptCard extends HTMLElement {
         resolve,
         milliseconds
       )
+    );
+  }
+
+  invalidateRequests() {
+    this._requestGeneration =
+      (this._requestGeneration || 0) + 1;
+
+    this._pollBusy = false;
+
+    return this._requestGeneration;
+  }
+
+  isCurrentRequest(generation) {
+    return (
+      generation ===
+      this._requestGeneration
+    );
+  }
+
+  isCurrentTaskRequest(
+    generation,
+    taskId
+  ) {
+    return (
+      this.isCurrentRequest(generation) &&
+      this._activeTaskId === taskId
     );
   }
 
@@ -2309,7 +2667,8 @@ class CodexPromptCard extends HTMLElement {
   async callServiceWithResponse(
     domain,
     service,
-    data = {}
+    data = {},
+    options = {}
   ) {
     const result =
       await this._hass.callService(
@@ -2317,7 +2676,7 @@ class CodexPromptCard extends HTMLElement {
         service,
         data,
         undefined,
-        true,
+        options.notifyOnError ?? true,
         true
       );
 
@@ -2411,7 +2770,28 @@ class CodexPromptCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.invalidateRequests();
     this.stopPolling();
+    this._operationBusy = false;
+
+    if (this._scrollSettleTimer) {
+      clearTimeout(
+        this._scrollSettleTimer
+      );
+
+      this._scrollSettleTimer = null;
+    }
+  }
+
+  connectedCallback() {
+    if (
+      this._hass &&
+      this._activeTaskId &&
+      !this._pollTimer &&
+      !this._pollBusy
+    ) {
+      this.schedulePoll(0);
+    }
   }
 
   getCardSize() {

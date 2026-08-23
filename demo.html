@@ -109,6 +109,30 @@
         );
         card.setWorking(false, "Ready", "ready");
       }
+
+      if (state === "scroll") {
+        for (let index = 1; index <= 12; index += 1) {
+          card.addMessage(
+            index % 2 === 0 ? "codex" : "user",
+            index % 2 === 0
+              ? `History response ${index}. This is a longer message used to verify that reading older content is not interrupted when new task updates arrive.`
+              : `History prompt ${index}. Please review this part of the dashboard configuration.`
+          );
+        }
+
+        card.setWorking(true, "Working", "running");
+
+        const conversation = card.querySelector("#conversation");
+        conversation.scrollTop = Math.max(0, conversation.scrollHeight / 3);
+        conversation.dispatchEvent(new Event("scroll"));
+
+        setTimeout(() => {
+          card.addMessage(
+            "codex",
+            "A new update arrived while you were reading history. The viewport should stay where it was, and the Latest button should appear."
+          );
+        }, 1200);
+      }
     </script>
   </body>
 </html>
